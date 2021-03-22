@@ -29,7 +29,7 @@ func periodicClean(c *cache.Cache, stop <-chan struct{}) {
 	for {
 		select {
 		case <-tick.C:
-			// we sign for 8 days, check if a signature in the cache reached 3/4 of that, if found delete
+			// we sign for 8 days, check if a signature in the cache reached 75% of that (i.e. 6), if found delete
 			// the signature
 			is75 := time.Now().UTC().Add(sixDays)
 			c.Walk(func(items map[uint64]interface{}, key uint64) bool {
