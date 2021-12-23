@@ -11,7 +11,8 @@ import (
 	"github.com/coredns/coredns/plugin/kubernetes/object"
 
 	api "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
+	discoveryV1beta1 "k8s.io/api/discovery/v1beta1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,7 +39,7 @@ type dnsController interface {
 	EpIndexReverse(string) []*object.Endpoints
 
 	GetNodeByName(context.Context, string) (*api.Node, error)
-	GetNamespaceByName(string) (*api.Namespace, error)
+	GetNamespaceByName(string) (*object.Namespace, error)
 
 	Run()
 	HasSynced() bool
@@ -99,7 +100,7 @@ type dnsControlOpts struct {
 	endpointNameMode bool
 }
 
-// newDNSController creates a controller for CoreDNS.
+// newdnsController creates a controller for CoreDNS.
 func newdnsController(ctx context.Context, kubeClient kubernetes.Interface, opts dnsControlOpts) *dnsControl {
 	dns := dnsControl{
 		client:            kubeClient,
@@ -149,14 +150,16 @@ func newdnsController(ctx context.Context, kubeClient kubernetes.Interface, opts
 		dns.epLock.Unlock()
 	}
 
-	dns.nsLister, dns.nsController = cache.NewInformer(
+	dns.nsLister, dns.nsController = object.NewIndexerInformer(
 		&cache.ListWatch{
 			ListFunc:  namespaceListFunc(ctx, dns.client, dns.namespaceSelector),
 			WatchFunc: namespaceWatchFunc(ctx, dns.client, dns.namespaceSelector),
 		},
 		&api.Namespace{},
-		defaultResyncPeriod,
-		cache.ResourceEventHandlerFuncs{})
+		cache.ResourceEventHandlerFuncs{},
+		cache.Indexers{},
+		object.DefaultProcessor(object.ToNamespace, nil),
+	)
 
 	return &dns
 }
@@ -176,6 +179,23 @@ func (dns *dnsControl) WatchEndpoints(ctx context.Context) {
 		cache.ResourceEventHandlerFuncs{AddFunc: dns.Add, UpdateFunc: dns.Update, DeleteFunc: dns.Delete},
 		cache.Indexers{epNameNamespaceIndex: epNameNamespaceIndexFunc, epIPIndex: epIPIndexFunc},
 		object.DefaultProcessor(object.ToEndpoints, dns.EndpointsLatencyRecorder()),
+	)
+	dns.epLock.Unlock()
+}
+
+// WatchEndpointSliceV1beta1 will set the endpoint Lister and Controller to watch v1beta1
+// instead of the default v1.
+func (dns *dnsControl) WatchEndpointSliceV1beta1(ctx context.Context) {
+	dns.epLock.Lock()
+	dns.epLister, dns.epController = object.NewIndexerInformer(
+		&cache.ListWatch{
+			ListFunc:  endpointSliceListFuncV1beta1(ctx, dns.client, api.NamespaceAll, dns.selector),
+			WatchFunc: endpointSliceWatchFuncV1beta1(ctx, dns.client, api.NamespaceAll, dns.selector),
+		},
+		&discoveryV1beta1.EndpointSlice{},
+		cache.ResourceEventHandlerFuncs{AddFunc: dns.Add, UpdateFunc: dns.Update, DeleteFunc: dns.Delete},
+		cache.Indexers{epNameNamespaceIndex: epNameNamespaceIndexFunc, epIPIndex: epIPIndexFunc},
+		object.DefaultProcessor(object.EndpointSliceV1beta1ToEndpoints, dns.EndpointSliceLatencyRecorder()),
 	)
 	dns.epLock.Unlock()
 }
@@ -262,13 +282,21 @@ func podListFunc(ctx context.Context, c kubernetes.Interface, ns string, s label
 		return c.CoreV1().Pods(ns).List(ctx, opts)
 	}
 }
+func endpointSliceListFuncV1beta1(ctx context.Context, c kubernetes.Interface, ns string, s labels.Selector) func(meta.ListOptions) (runtime.Object, error) {
+	return func(opts meta.ListOptions) (runtime.Object, error) {
+		if s != nil {
+			opts.LabelSelector = s.String()
+		}
+		return c.DiscoveryV1beta1().EndpointSlices(ns).List(ctx, opts)
+	}
+}
 
 func endpointSliceListFunc(ctx context.Context, c kubernetes.Interface, ns string, s labels.Selector) func(meta.ListOptions) (runtime.Object, error) {
 	return func(opts meta.ListOptions) (runtime.Object, error) {
 		if s != nil {
 			opts.LabelSelector = s.String()
 		}
-		return c.DiscoveryV1beta1().EndpointSlices(ns).List(ctx, opts)
+		return c.DiscoveryV1().EndpointSlices(ns).List(ctx, opts)
 	}
 }
 
@@ -312,12 +340,21 @@ func podWatchFunc(ctx context.Context, c kubernetes.Interface, ns string, s labe
 	}
 }
 
-func endpointSliceWatchFunc(ctx context.Context, c kubernetes.Interface, ns string, s labels.Selector) func(options meta.ListOptions) (watch.Interface, error) {
+func endpointSliceWatchFuncV1beta1(ctx context.Context, c kubernetes.Interface, ns string, s labels.Selector) func(options meta.ListOptions) (watch.Interface, error) {
 	return func(options meta.ListOptions) (watch.Interface, error) {
 		if s != nil {
 			options.LabelSelector = s.String()
 		}
 		return c.DiscoveryV1beta1().EndpointSlices(ns).Watch(ctx, options)
+	}
+}
+
+func endpointSliceWatchFunc(ctx context.Context, c kubernetes.Interface, ns string, s labels.Selector) func(options meta.ListOptions) (watch.Interface, error) {
+	return func(options meta.ListOptions) (watch.Interface, error) {
+		if s != nil {
+			options.LabelSelector = s.String()
+		}
+		return c.DiscoveryV1().EndpointSlices(ns).Watch(ctx, options)
 	}
 }
 
@@ -504,22 +541,23 @@ func (dns *dnsControl) GetNodeByName(ctx context.Context, name string) (*api.Nod
 }
 
 // GetNamespaceByName returns the namespace by name. If nothing is found an error is returned.
-func (dns *dnsControl) GetNamespaceByName(name string) (*api.Namespace, error) {
-	os := dns.nsLister.List()
-	for _, o := range os {
-		ns, ok := o.(*api.Namespace)
-		if !ok {
-			continue
-		}
-		if name == ns.ObjectMeta.Name {
-			return ns, nil
-		}
+func (dns *dnsControl) GetNamespaceByName(name string) (*object.Namespace, error) {
+	o, exists, err := dns.nsLister.GetByKey(name)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("namespace not found")
+	if !exists {
+		return nil, fmt.Errorf("namespace not found")
+	}
+	ns, ok := o.(*object.Namespace)
+	if !ok {
+		return nil, fmt.Errorf("found key but not namespace")
+	}
+	return ns, nil
 }
 
-func (dns *dnsControl) Add(obj interface{})               { dns.updateModifed() }
-func (dns *dnsControl) Delete(obj interface{})            { dns.updateModifed() }
+func (dns *dnsControl) Add(obj interface{})               { dns.updateModified() }
+func (dns *dnsControl) Delete(obj interface{})            { dns.updateModified() }
 func (dns *dnsControl) Update(oldObj, newObj interface{}) { dns.detectChanges(oldObj, newObj) }
 
 // detectChanges detects changes in objects, and updates the modified timestamp
@@ -534,12 +572,12 @@ func (dns *dnsControl) detectChanges(oldObj, newObj interface{}) {
 	}
 	switch ob := obj.(type) {
 	case *object.Service:
-		dns.updateModifed()
+		dns.updateModified()
 	case *object.Pod:
-		dns.updateModifed()
+		dns.updateModified()
 	case *object.Endpoints:
 		if !endpointsEquivalent(oldObj.(*object.Endpoints), newObj.(*object.Endpoints)) {
-			dns.updateModifed()
+			dns.updateModified()
 		}
 	default:
 		log.Warningf("Updates for %T not supported.", ob)
@@ -614,7 +652,7 @@ func (dns *dnsControl) Modified() int64 {
 }
 
 // updateModified set dns.modified to the current time.
-func (dns *dnsControl) updateModifed() {
+func (dns *dnsControl) updateModified() {
 	unix := time.Now().Unix()
 	atomic.StoreInt64(&dns.modified, unix)
 }
