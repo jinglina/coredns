@@ -18,7 +18,7 @@ require (
 	github.com/imdario/mergo v0.3.12 // indirect
 	github.com/infobloxopen/go-trees v0.0.0-20200715205103-96a057b8dfb9
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
-	github.com/miekg/dns v1.1.43
+	github.com/miekg/dns v1.1.51
 	github.com/opentracing/opentracing-go v1.2.0
 	github.com/openzipkin-contrib/zipkin-go-opentracing v0.4.5
 	github.com/openzipkin/zipkin-go v0.3.0
@@ -31,7 +31,7 @@ require (
 	go.etcd.io/etcd/api/v3 v3.5.1
 	go.etcd.io/etcd/client/v3 v3.5.1
 	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
-	golang.org/x/sys v0.0.0-20211210111614-af8b64212486
+	golang.org/x/sys v0.2.0
 	google.golang.org/api v0.63.0
 	google.golang.org/grpc v1.43.0
 	gopkg.in/DataDog/dd-trace-go.v1 v1.34.0
